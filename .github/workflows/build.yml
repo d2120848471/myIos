@@ -37,13 +37,27 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          dylib_path="$(find . -type f -name \"AutoTap.dylib\" | head -n 1 || true)"
-          if [[ -n \"${dylib_path}\" ]]; then
-            cp \"${dylib_path}\" \"dist/AutoTap.dylib\"
+          dylib_path="$(find . -type f -name 'AutoTap.dylib' -print -quit 2>/dev/null || true)"
+          if [[ -n "${dylib_path}" ]]; then
+            cp "${dylib_path}" "dist/AutoTap.dylib"
           fi
 
-          if [[ -d \"packages\" ]]; then
+          if [[ -d "packages" ]]; then
             cp packages/*.deb dist/ 2>/dev/null || true
+          fi
+
+          # 兜底：若没有直接生成 dylib，则从 deb 中解包提取。
+          if [[ ! -f "dist/AutoTap.dylib" ]]; then
+            deb_path="$(ls -1 packages/*.deb 2>/dev/null | head -n 1 || true)"
+            if [[ -n "${deb_path}" ]]; then
+              tmp_dir="$(mktemp -d)"
+              dpkg-deb -x "${deb_path}" "${tmp_dir}"
+              extracted_dylib="$(find "${tmp_dir}" -type f -name 'AutoTap.dylib' -print -quit 2>/dev/null || true)"
+              if [[ -n "${extracted_dylib}" ]]; then
+                cp "${extracted_dylib}" "dist/AutoTap.dylib"
+              fi
+              rm -rf "${tmp_dir}"
+            fi
           fi
 
           ls -la dist || true
