@@ -26,10 +26,16 @@ NSNotificationName const ATClickEngineStateDidChangeNotification = @"ATClickEngi
     return self;
 }
 
-- (void)startWithPlan:(ATTapPlan *)plan
+- (BOOL)startWithPlan:(ATTapPlan *)plan
 {
     if (!plan) {
-        return;
+        return NO;
+    }
+    if (plan.steps.count == 0) {
+        return NO;
+    }
+    if (![self.tapper isAvailable]) {
+        return NO;
     }
 
     [self stop];
@@ -57,6 +63,8 @@ NSNotificationName const ATClickEngineStateDidChangeNotification = @"ATClickEngi
             [strongSelf notifyStateChanged];
         }
     });
+
+    return YES;
 }
 
 - (void)stop

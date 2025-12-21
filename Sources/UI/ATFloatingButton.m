@@ -29,7 +29,7 @@
     _playing = playing;
     if (playing) {
         self.backgroundColor = [UIColor colorWithRed:0.95 green:0.35 blue:0.25 alpha:0.92];
-        [self setTitle:@"▶︎" forState:UIControlStateNormal];
+        [self setTitle:@"⏹" forState:UIControlStateNormal];
     } else {
         self.backgroundColor = [UIColor colorWithRed:0.18 green:0.45 blue:0.95 alpha:0.92];
         [self setTitle:@"AT" forState:UIControlStateNormal];
@@ -61,4 +61,3 @@
 }
 
 @end
-

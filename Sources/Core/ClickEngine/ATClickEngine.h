@@ -16,7 +16,8 @@ FOUNDATION_EXPORT NSNotificationName const ATClickEngineStateDidChangeNotificati
 @property (atomic, strong, readonly, nullable) ATTapPlan *currentPlan;
 
 /// 开始执行（若正在运行会先停止再启动）。
-- (void)startWithPlan:(ATTapPlan *)plan;
+/// 返回是否启动成功（例如：步骤为空、或当前环境不支持 IOHID 注入时会失败）。
+- (BOOL)startWithPlan:(ATTapPlan *)plan;
 
 /// 停止执行（可重复调用）。
 - (void)stop;

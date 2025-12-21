@@ -249,7 +249,14 @@
     if (self.engine.isRunning) {
         [self.engine stop];
     } else {
-        [self.engine startWithPlan:self.plan];
+        BOOL ok = [self.engine startWithPlan:self.plan];
+        if (!ok) {
+            [self showMessage:@"启动失败：请先添加步骤，并确认当前 TrollStore 环境支持 IOHID 触控注入。"
+                        title:@"无法开始执行"];
+        } else {
+            // 开始执行后自动收起面板，避免遮挡目标 App，且防止注入点击落到面板自身导致“看起来没点到”。
+            self.view.hidden = YES;
+        }
     }
     [self.tableView reloadData];
 }

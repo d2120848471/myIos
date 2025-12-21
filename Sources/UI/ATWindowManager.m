@@ -1,5 +1,6 @@
 #import "ATWindowManager.h"
 
+#import "ATClickEngine.h"
 #import "ATFloatingButton.h"
 #import "ATPanelViewController.h"
 
@@ -28,6 +29,7 @@
 @property (nonatomic, strong) UIViewController *rootViewController;
 @property (nonatomic, strong) ATFloatingButton *floatingButton;
 @property (nonatomic, strong) ATPanelViewController *panelViewController;
+@property (nonatomic, weak, nullable) ATClickEngine *engine;
 @property (nonatomic, assign) BOOL started;
 @end
 
@@ -98,6 +100,7 @@
 
     [self setupFloatingButton];
     [self setupPanel];
+    [self setupObserversIfNeeded];
 
     window.hidden = NO;
 }
@@ -119,10 +122,17 @@
         return strongSelf.window;
     }];
 
-    CGFloat margin = 16;
+    CGFloat margin = 12;
     CGSize screenSize = self.rootViewController.view.bounds.size;
-    CGFloat width = MIN(360, screenSize.width - margin * 2);
-    CGFloat height = MIN(520, screenSize.height - margin * 2);
+    if (screenSize.width <= 0 || screenSize.height <= 0) {
+        screenSize = [UIScreen mainScreen].bounds.size;
+    }
+
+    // 面板默认做得更“紧凑”，避免遮挡目标 App 的主要交互区域；内容可滚动，不影响功能完整性。
+    CGFloat maxWidth = MIN(340, screenSize.width - margin * 2);
+    CGFloat maxHeight = MIN(480, floor(screenSize.height * 0.5));
+    CGFloat width = MAX(280, maxWidth);
+    CGFloat height = MAX(320, MIN(maxHeight, screenSize.height - margin * 2));
     panel.view.frame = CGRectMake((screenSize.width - width) / 2.0, (screenSize.height - height) / 2.0, width, height);
     panel.view.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
     panel.view.hidden = YES;
@@ -136,6 +146,13 @@
 
 - (void)handleFloatingButtonTapped
 {
+    // 运行中优先“一键停止”，避免误触打开面板后注入点击落到面板自身。
+    if (self.engine.isRunning) {
+        [self.engine stop];
+        [self hidePanel];
+        return;
+    }
+
     BOOL willShow = self.panelViewController.view.hidden;
     if (willShow) {
         [self showPanel];
@@ -147,6 +164,9 @@
 - (void)showPanel
 {
     UIView *panelView = self.panelViewController.view;
+    if (!panelView.hidden) {
+        return;
+    }
     panelView.hidden = NO;
     panelView.alpha = 0;
     panelView.transform = CGAffineTransformMakeScale(0.98, 0.98);
@@ -160,6 +180,9 @@
 - (void)hidePanel
 {
     UIView *panelView = self.panelViewController.view;
+    if (panelView.hidden) {
+        return;
+    }
     [UIView animateWithDuration:0.18 animations:^{
         panelView.alpha = 0;
         panelView.transform = CGAffineTransformMakeScale(0.98, 0.98);
@@ -170,5 +193,32 @@
     }];
 }
 
-@end
+#pragma mark - 通知
 
+- (void)setupObserversIfNeeded
+{
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleEngineStateChanged:)
+                                                     name:ATClickEngineStateDidChangeNotification
+                                                   object:nil];
+    });
+}
+
+- (void)handleEngineStateChanged:(NSNotification *)note
+{
+    if (![note.object isKindOfClass:[ATClickEngine class]]) {
+        return;
+    }
+
+    ATClickEngine *engine = (ATClickEngine *)note.object;
+    self.engine = engine;
+    self.floatingButton.playing = engine.isRunning;
+
+    if (engine.isRunning) {
+        [self hidePanel];
+    }
+}
+
+@end

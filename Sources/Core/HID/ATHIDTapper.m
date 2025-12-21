@@ -55,18 +55,28 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 {
     self = [super init];
     if (self) {
-        _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-        // senderID 取一个非 0 的随机值即可。
-        _senderID = (((uint64_t)arc4random()) << 32) | (uint64_t)arc4random();
-        if (_senderID == 0) {
-            _senderID = 1;
-        }
+        [self setupClientIfNeeded];
     }
     return self;
 }
 
+- (void)dealloc
+{
+    if (_client) {
+        CFRelease(_client);
+        _client = nil;
+    }
+}
+
+- (BOOL)isAvailable
+{
+    [self setupClientIfNeeded];
+    return self.client != nil;
+}
+
 - (void)tapAtPoint:(CGPoint)point
 {
+    [self setupClientIfNeeded];
     if (!self.client) {
         return;
     }
@@ -80,37 +90,60 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     double x = MAX(0.0, MIN(1.0, point.x / screenSize.width));
     double y = MAX(0.0, MIN(1.0, point.y / screenSize.height));
 
-    [self sendTouchWithX:x y:y down:YES];
+    // 触控序列：按下(范围内+触摸) → 抬起(范围内+不触摸) → 离开(不在范围内)。
+    // 这样比仅“down/up”更贴近系统真实事件，且能减少部分 App 丢失结束事件的概率。
+    [self sendTouchWithX:x y:y range:YES touch:YES];
 
     // 轻微停顿模拟真实点击；避免过短导致部分 App 丢事件。
     [NSThread sleepForTimeInterval:0.02];
 
-    [self sendTouchWithX:x y:y down:NO];
+    [self sendTouchWithX:x y:y range:YES touch:NO];
+
+    // 再补一个离开范围事件，避免部分组件将“range=true,touch=false”视为悬停状态。
+    [NSThread sleepForTimeInterval:0.01];
+    [self sendTouchWithX:x y:y range:NO touch:NO];
 }
 
 #pragma mark - 私有方法
 
-- (void)sendTouchWithX:(double)x y:(double)y down:(BOOL)down
+- (void)setupClientIfNeeded
+{
+    if (_client) {
+        return;
+    }
+    _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
+
+    // senderID 取一个非 0 的随机值即可。
+    _senderID = (((uint64_t)arc4random()) << 32) | (uint64_t)arc4random();
+    if (_senderID == 0) {
+        _senderID = 1;
+    }
+}
+
+- (void)sendTouchWithX:(double)x y:(double)y range:(BOOL)range touch:(BOOL)touch
 {
     uint64_t timeStamp = mach_absolute_time();
 
     // 说明：
     // - 这里复用常见的 digitizer + finger 子事件模式，兼容性更好。
     // - transducerType 使用 0x23，参考已分析的同类 dylib 调用习惯。
+    // - eventMask 同时携带 range + touch；由 range/touch 组合表达按下、抬起、离开范围等状态变化。
+    uint32_t eventMask = 0x3;
+    double pressure = touch ? 1.0 : 0.0;
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(kCFAllocatorDefault,
                                                           timeStamp,
                                                           0x23,
                                                           0,
                                                           0,
-                                                          0x2,
+                                                          eventMask,
                                                           0,
+                                                          x,
+                                                          y,
                                                           0,
+                                                          pressure,
                                                           0,
-                                                          0,
-                                                          0,
-                                                          0,
-                                                          true,
-                                                          down,
+                                                          range ? true : false,
+                                                          touch ? true : false,
                                                           0);
 
     if (!parent) {
@@ -120,18 +153,19 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault,
                                                                 timeStamp,
                                                                 1,
-                                                                3,
-                                                                0x2,
+                                                                1,
+                                                                eventMask,
                                                                 0,
                                                                 x,
                                                                 y,
                                                                 0,
-                                                                down ? 1.0 : 0.0,
+                                                                pressure,
                                                                 0,
-                                                                true,
-                                                                down,
+                                                                range ? true : false,
+                                                                touch ? true : false,
                                                                 0);
     if (finger) {
+        IOHIDEventSetSenderID(finger, self.senderID);
         IOHIDEventAppendEvent(parent, finger, 0);
         CFRelease(finger);
     }
@@ -142,4 +176,3 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 }
 
 @end
-
