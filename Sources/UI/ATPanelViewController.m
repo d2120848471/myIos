@@ -1,0 +1,602 @@
+#import "ATPanelViewController.h"
+
+#import "ATClickEngine.h"
+#import "ATPersistence.h"
+#import "ATTapPlan.h"
+#import "ATTapStep.h"
+#import "ATTouchPicker.h"
+
+@interface ATPanelViewController () <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, copy) UIWindow * _Nullable (^hostWindowProvider)(void);
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) ATClickEngine *engine;
+@property (nonatomic, strong) ATPersistence *persistence;
+@property (nonatomic, strong) ATTouchPicker *picker;
+@property (nonatomic, strong) ATTapPlan *plan;
+@end
+
+@implementation ATPanelViewController
+
+- (instancetype)initWithHostWindowProvider:(UIWindow * _Nullable (^)(void))hostWindowProvider
+{
+    self = [super initWithNibName:nil bundle:nil];
+    if (self) {
+        _hostWindowProvider = [hostWindowProvider copy];
+        _engine = [[ATClickEngine alloc] init];
+        _persistence = [ATPersistence shared];
+        _picker = [[ATTouchPicker alloc] init];
+        _plan = [_persistence loadLastOrDefaultPlan];
+
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleEngineStateChanged:)
+                                                     name:ATClickEngineStateDidChangeNotification
+                                                   object:_engine];
+    }
+    return self;
+}
+
+- (void)dealloc
+{
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+
+    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.35];
+    self.view.layer.cornerRadius = 14;
+    self.view.layer.masksToBounds = YES;
+
+    UITableViewStyle style = UITableViewStyleInsetGrouped;
+    _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:style];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.backgroundColor = [UIColor clearColor];
+    _tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 16);
+    [self.view addSubview:_tableView];
+}
+
+- (void)viewDidLayoutSubviews
+{
+    [super viewDidLayoutSubviews];
+    self.tableView.frame = self.view.bounds;
+}
+
+#pragma mark - UITableViewDataSource
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView
+{
+    return 3;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
+{
+    switch (section) {
+        case 0:
+            return 2; // 名称/循环
+        case 1:
+            return self.plan.steps.count + 1; // 步骤 + 添加
+        case 2:
+            return 4; // 开始停止/保存/加载/删除
+        default:
+            return 0;
+    }
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section
+{
+    switch (section) {
+        case 0:
+            return @"方案设置";
+        case 1:
+            return @"步骤列表";
+        case 2:
+            return @"操作";
+        default:
+            return nil;
+    }
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"cell"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"cell"];
+        cell.backgroundColor = [UIColor colorWithWhite:1 alpha:0.06];
+        cell.textLabel.textColor = [UIColor whiteColor];
+        cell.detailTextLabel.textColor = [UIColor colorWithWhite:1 alpha:0.75];
+        cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+    }
+
+    cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.textLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    cell.detailTextLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightRegular];
+    cell.textLabel.textColor = [UIColor whiteColor];
+
+    if (indexPath.section == 0) {
+        if (indexPath.row == 0) {
+            cell.textLabel.text = @"名称";
+            cell.detailTextLabel.text = self.plan.name ?: @"";
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        } else {
+            cell.textLabel.text = @"循环次数";
+            cell.detailTextLabel.text = [NSString stringWithFormat:@"%ld", (long)MAX(1, self.plan.loopCount)];
+            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        }
+        return cell;
+    }
+
+    if (indexPath.section == 1) {
+        if (indexPath.row == self.plan.steps.count) {
+            cell.textLabel.text = @"➕ 添加步骤（取点）";
+            cell.detailTextLabel.text = @"";
+            cell.accessoryType = UITableViewCellAccessoryNone;
+            return cell;
+        }
+
+        ATTapStep *step = self.plan.steps[indexPath.row];
+        cell.textLabel.text = [NSString stringWithFormat:@"步骤 %ld", (long)indexPath.row + 1];
+        cell.detailTextLabel.text = [NSString stringWithFormat:@"x=%.0f y=%.0f 延迟=%ldms",
+                                     step.point.x,
+                                     step.point.y,
+                                     (long)MAX(0, step.delayMs)];
+        cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+        return cell;
+    }
+
+    // section == 2
+    switch (indexPath.row) {
+        case 0: {
+            BOOL running = self.engine.isRunning;
+            cell.textLabel.text = running ? @"⏹ 停止执行" : @"▶︎ 开始执行";
+            cell.detailTextLabel.text = running ? @"运行中" : @"";
+            cell.textLabel.textColor = running ? [UIColor colorWithRed:1 green:0.35 blue:0.25 alpha:1] : [UIColor colorWithRed:0.35 green:1 blue:0.55 alpha:1];
+            break;
+        }
+        case 1:
+            cell.textLabel.text = @"💾 保存方案";
+            cell.detailTextLabel.text = @"";
+            break;
+        case 2:
+            cell.textLabel.text = @"📂 加载方案";
+            cell.detailTextLabel.text = @"";
+            break;
+        case 3:
+            cell.textLabel.text = @"🗑 删除当前方案";
+            cell.detailTextLabel.text = @"";
+            cell.textLabel.textColor = [UIColor colorWithRed:1 green:0.35 blue:0.25 alpha:1];
+            break;
+        default:
+            break;
+    }
+    return cell;
+}
+
+#pragma mark - UITableViewDelegate
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+
+    if (indexPath.section == 0) {
+        if (indexPath.row == 0) {
+            [self promptEditPlanName];
+        } else {
+            [self promptEditLoopCount];
+        }
+        return;
+    }
+
+    if (indexPath.section == 1) {
+        if (indexPath.row == self.plan.steps.count) {
+            [self addStepByPickingPoint];
+            return;
+        }
+
+        [self showStepActionsAtIndex:indexPath.row sourceView:[tableView cellForRowAtIndexPath:indexPath]];
+        return;
+    }
+
+    if (indexPath.section == 2) {
+        switch (indexPath.row) {
+            case 0:
+                [self toggleStartStop];
+                break;
+            case 1:
+                [self saveCurrentPlan];
+                break;
+            case 2:
+                [self showLoadPlanSheetFromSourceView:[tableView cellForRowAtIndexPath:indexPath]];
+                break;
+            case 3:
+                [self confirmDeleteCurrentPlanFromSourceView:[tableView cellForRowAtIndexPath:indexPath]];
+                break;
+            default:
+                break;
+        }
+        return;
+    }
+}
+
+- (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath
+{
+    if (indexPath.section != 1 || indexPath.row >= self.plan.steps.count) {
+        return nil;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    UIContextualAction *deleteAction = [UIContextualAction contextualActionWithStyle:UIContextualActionStyleDestructive
+                                                                              title:@"删除"
+                                                                            handler:^(__kindof UIContextualAction *action, UIView *sourceView, void (^completionHandler)(BOOL)) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            completionHandler(NO);
+            return;
+        }
+        [strongSelf removeStepAtIndex:indexPath.row];
+        completionHandler(YES);
+    }];
+
+    UISwipeActionsConfiguration *config = [UISwipeActionsConfiguration configurationWithActions:@[deleteAction]];
+    return config;
+}
+
+#pragma mark - 交互
+
+- (void)toggleStartStop
+{
+    if (self.engine.isRunning) {
+        [self.engine stop];
+    } else {
+        [self.engine startWithPlan:self.plan];
+    }
+    [self.tableView reloadData];
+}
+
+- (void)saveCurrentPlan
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存方案"
+                                                                   message:@"输入方案名称（同名会覆盖）"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"例如：Boss连点";
+        textField.text = self.plan.name ?: @"";
+    }];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"保存" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSString *name = alert.textFields.firstObject.text ?: @"";
+        strongSelf.plan.name = name;
+        NSError *saveError = nil;
+        BOOL ok = [strongSelf.persistence savePlan:strongSelf.plan error:&saveError];
+        if (!ok) {
+            [strongSelf showError:saveError title:@"保存失败"];
+        } else {
+            [strongSelf.tableView reloadData];
+        }
+    }]];
+
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showLoadPlanSheetFromSourceView:(UIView *)sourceView
+{
+    NSArray<NSString *> *names = [self.persistence allPlanNames];
+    if (names.count == 0) {
+        [self showMessage:@"当前没有已保存的方案" title:@"加载方案"];
+        return;
+    }
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"加载方案"
+                                                                   message:@"选择要加载的方案"
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    __weak typeof(self) weakSelf = self;
+    for (NSString *name in names) {
+        [sheet addAction:[UIAlertAction actionWithTitle:name style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            [strongSelf loadPlanNamed:name];
+        }]];
+    }
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet fromSourceView:sourceView];
+}
+
+- (void)confirmDeleteCurrentPlanFromSourceView:(UIView *)sourceView
+{
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"删除方案"
+                                                                   message:@"确认删除当前方案文件？（不会影响内存中当前编辑内容）"
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+
+    __weak typeof(self) weakSelf = self;
+    [sheet addAction:[UIAlertAction actionWithTitle:@"删除" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSError *error = nil;
+        BOOL ok = [strongSelf.persistence deletePlanNamed:strongSelf.plan.name error:&error];
+        if (!ok) {
+            [strongSelf showError:error title:@"删除失败"];
+        } else {
+            [strongSelf showMessage:@"已删除" title:@"删除方案"];
+        }
+    }]];
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet fromSourceView:sourceView];
+}
+
+- (void)promptEditPlanName
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"修改名称"
+                                                                   message:@"用于保存/切换方案"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.text = self.plan.name ?: @"";
+    }];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSString *name = alert.textFields.firstObject.text ?: @"";
+        strongSelf.plan.name = name;
+        [strongSelf.tableView reloadData];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)promptEditLoopCount
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"循环次数"
+                                                                   message:@"填写 >= 1 的整数"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.keyboardType = UIKeyboardTypeNumberPad;
+        textField.text = [NSString stringWithFormat:@"%ld", (long)MAX(1, self.plan.loopCount)];
+    }];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSString *text = alert.textFields.firstObject.text ?: @"";
+        NSInteger value = text.integerValue;
+        strongSelf.plan.loopCount = MAX(1, value);
+        [strongSelf.tableView reloadData];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)addStepByPickingPoint
+{
+    UIWindow *window = self.hostWindowProvider ? self.hostWindowProvider() : nil;
+    if (!window) {
+        [self showMessage:@"未找到可用 window，无法取点" title:@"取点失败"];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [self.picker beginPickInWindow:window completion:^(CGPoint point) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf promptDelayForNewStepAtPoint:point];
+    } cancel:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf showMessage:@"已取消取点（长按可取消）" title:@"取点"];
+    }];
+}
+
+- (void)promptDelayForNewStepAtPoint:(CGPoint)point
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"设置延迟"
+                                                                   message:@"本步骤点击后，等待多少毫秒进入下一步"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.keyboardType = UIKeyboardTypeNumberPad;
+        textField.placeholder = @"例如：500";
+        textField.text = @"500";
+    }];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"添加" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSInteger delayMs = alert.textFields.firstObject.text.integerValue;
+        ATTapStep *step = [[ATTapStep alloc] initWithPoint:point delayMs:delayMs];
+
+        NSMutableArray<ATTapStep *> *steps = [strongSelf.plan.steps mutableCopy] ?: [NSMutableArray array];
+        [steps addObject:step];
+        strongSelf.plan.steps = steps;
+        [strongSelf.tableView reloadData];
+    }]];
+
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)showStepActionsAtIndex:(NSInteger)index sourceView:(UIView *)sourceView
+{
+    if (index < 0 || index >= self.plan.steps.count) {
+        return;
+    }
+
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"步骤操作"
+                                                                   message:nil
+                                                            preferredStyle:UIAlertControllerStyleActionSheet];
+    __weak typeof(self) weakSelf = self;
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"修改延迟" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf promptEditDelayAtIndex:index];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"重选位置" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf repickPointAtIndex:index];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"删除步骤" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf removeStepAtIndex:index];
+    }]];
+
+    [sheet addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentActionSheet:sheet fromSourceView:sourceView];
+}
+
+- (void)promptEditDelayAtIndex:(NSInteger)index
+{
+    ATTapStep *step = self.plan.steps[index];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"修改延迟"
+                                                                   message:@"填写毫秒（>= 0）"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.keyboardType = UIKeyboardTypeNumberPad;
+        textField.text = [NSString stringWithFormat:@"%ld", (long)MAX(0, step.delayMs)];
+    }];
+
+    __weak typeof(self) weakSelf = self;
+    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSInteger delayMs = alert.textFields.firstObject.text.integerValue;
+
+        NSMutableArray<ATTapStep *> *steps = [strongSelf.plan.steps mutableCopy];
+        ATTapStep *updated = [[ATTapStep alloc] initWithPoint:step.point delayMs:delayMs];
+        steps[index] = updated;
+        strongSelf.plan.steps = steps;
+        [strongSelf.tableView reloadData];
+    }]];
+
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)repickPointAtIndex:(NSInteger)index
+{
+    UIWindow *window = self.hostWindowProvider ? self.hostWindowProvider() : nil;
+    if (!window) {
+        [self showMessage:@"未找到可用 window，无法取点" title:@"取点失败"];
+        return;
+    }
+
+    ATTapStep *oldStep = self.plan.steps[index];
+    __weak typeof(self) weakSelf = self;
+    [self.picker beginPickInWindow:window completion:^(CGPoint point) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSMutableArray<ATTapStep *> *steps = [strongSelf.plan.steps mutableCopy];
+        ATTapStep *updated = [[ATTapStep alloc] initWithPoint:point delayMs:oldStep.delayMs];
+        steps[index] = updated;
+        strongSelf.plan.steps = steps;
+        [strongSelf.tableView reloadData];
+    } cancel:^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf showMessage:@"已取消取点（长按可取消）" title:@"取点"];
+    }];
+}
+
+- (void)removeStepAtIndex:(NSInteger)index
+{
+    if (index < 0 || index >= self.plan.steps.count) {
+        return;
+    }
+    NSMutableArray<ATTapStep *> *steps = [self.plan.steps mutableCopy];
+    [steps removeObjectAtIndex:index];
+    self.plan.steps = steps;
+    [self.tableView reloadData];
+}
+
+- (void)loadPlanNamed:(NSString *)name
+{
+    // 加载新方案前先停止，避免执行中修改数据造成混乱。
+    [self.engine stop];
+
+    NSError *error = nil;
+    ATTapPlan *plan = [self.persistence loadPlanNamed:name error:&error];
+    if (!plan) {
+        [self showError:error title:@"加载失败"];
+        return;
+    }
+
+    self.plan = plan;
+    [self.persistence setLastPlanName:plan.name];
+    [self.tableView reloadData];
+}
+
+#pragma mark - 引擎状态
+
+- (void)handleEngineStateChanged:(NSNotification *)note
+{
+    [self.tableView reloadData];
+}
+
+#pragma mark - 弹窗辅助
+
+- (void)presentActionSheet:(UIAlertController *)sheet fromSourceView:(UIView *)sourceView
+{
+    UIPopoverPresentationController *popover = sheet.popoverPresentationController;
+    if (popover && sourceView) {
+        popover.sourceView = sourceView;
+        popover.sourceRect = sourceView.bounds;
+        popover.permittedArrowDirections = UIPopoverArrowDirectionAny;
+    }
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)showError:(NSError *)error title:(NSString *)title
+{
+    NSString *message = error.localizedDescription ?: @"未知错误";
+    [self showMessage:message title:title];
+}
+
+- (void)showMessage:(NSString *)message title:(NSString *)title
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title
+                                                                   message:message
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
+@end

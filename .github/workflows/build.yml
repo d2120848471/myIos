@@ -1,0 +1,55 @@
+name: build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  theos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 安装 Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "${HOME}/theos"
+          echo "THEOS=${HOME}/theos" >> "${GITHUB_ENV}"
+
+      - name: 安装构建依赖
+        run: |
+          brew install ldid dpkg
+
+      - name: 配置 Xcode SDK
+        run: |
+          echo "THEOS_SDKS_PATH=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs" >> "${GITHUB_ENV}"
+
+      - name: 构建
+        run: |
+          make package
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          dylib_path="$(find . -type f -name \"AutoTap.dylib\" | head -n 1 || true)"
+          if [[ -n \"${dylib_path}\" ]]; then
+            cp \"${dylib_path}\" \"dist/AutoTap.dylib\"
+          fi
+
+          if [[ -d \"packages\" ]]; then
+            cp packages/*.deb dist/ 2>/dev/null || true
+          fi
+
+          ls -la dist || true
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutoTap-artifacts
+          path: dist/*

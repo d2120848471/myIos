@@ -1,0 +1,9 @@
+Package: com.autotap
+Name: AutoTap
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: iOS TrollStore 环境下的悬浮窗自动点击插件
+Maintainer: AutoTap
+Author: AutoTap
+Section: Tweaks
+
