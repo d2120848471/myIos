@@ -5,6 +5,8 @@
 #import "ATTapPlan.h"
 #import "ATTapStep.h"
 #import "ATTouchPicker.h"
+#import "ATQuickBarView.h"
+#import "ATStepMarkerView.h"
 
 @interface ATPanelViewController () <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, copy) UIWindow * _Nullable (^hostWindowProvider)(void);
@@ -13,6 +15,9 @@
 @property (nonatomic, strong) ATPersistence *persistence;
 @property (nonatomic, strong) ATTouchPicker *picker;
 @property (nonatomic, strong) ATTapPlan *plan;
+@property (nonatomic, strong, nullable) ATQuickBarView *quickBar;
+@property (nonatomic, strong) NSMutableArray<ATStepMarkerView *> *markerViews;
+@property (nonatomic, assign) BOOL hudInstalled;
 @end
 
 @implementation ATPanelViewController
@@ -26,6 +31,7 @@
         _persistence = [ATPersistence shared];
         _picker = [[ATTouchPicker alloc] init];
         _plan = [_persistence loadLastOrDefaultPlan];
+        _markerViews = [NSMutableArray array];
 
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(handleEngineStateChanged:)
@@ -55,6 +61,11 @@
     _tableView.backgroundColor = [UIColor clearColor];
     _tableView.separatorInset = UIEdgeInsetsMake(0, 16, 0, 16);
     [self.view addSubview:_tableView];
+
+    // 右侧快捷栏 + 拖拽点位（避免全屏遮罩影响目标 App 交互）。
+    [self installHUDIfNeeded];
+    [self reloadMarkers];
+    [self syncHUDState];
 }
 
 - (void)viewDidLayoutSubviews
@@ -129,7 +140,7 @@
 
     if (indexPath.section == 1) {
         if (indexPath.row == self.plan.steps.count) {
-            cell.textLabel.text = @"➕ 添加步骤（取点）";
+            cell.textLabel.text = @"➕ 添加步骤（拖拽）";
             cell.detailTextLabel.text = @"";
             cell.accessoryType = UITableViewCellAccessoryNone;
             return cell;
@@ -190,7 +201,7 @@
 
     if (indexPath.section == 1) {
         if (indexPath.row == self.plan.steps.count) {
-            [self addStepByPickingPoint];
+            [self addStepByQuickBar];
             return;
         }
 
@@ -259,6 +270,7 @@
         }
     }
     [self.tableView reloadData];
+    [self syncHUDState];
 }
 
 - (void)saveCurrentPlan
@@ -440,6 +452,7 @@
         [steps addObject:step];
         strongSelf.plan.steps = steps;
         [strongSelf.tableView reloadData];
+        [strongSelf reloadMarkers];
     }]];
 
     [self presentViewController:alert animated:YES completion:nil];
@@ -464,7 +477,7 @@
         [strongSelf promptEditDelayAtIndex:index];
     }]];
 
-    [sheet addAction:[UIAlertAction actionWithTitle:@"重选位置" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+    [sheet addAction:[UIAlertAction actionWithTitle:@"拖动调整位置" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) {
             return;
@@ -516,31 +529,32 @@
 
 - (void)repickPointAtIndex:(NSInteger)index
 {
-    UIWindow *window = self.hostWindowProvider ? self.hostWindowProvider() : nil;
-    if (!window) {
-        [self showMessage:@"未找到可用 window，无法取点" title:@"取点失败"];
+    [self installHUDIfNeeded];
+    if (index < 0 || index >= self.markerViews.count) {
+        [self showMessage:@"未找到对应的点位标记，请先添加步骤" title:@"调整位置"];
         return;
     }
 
-    ATTapStep *oldStep = self.plan.steps[index];
-    __weak typeof(self) weakSelf = self;
-    [self.picker beginPickInWindow:window completion:^(CGPoint point) {
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-        NSMutableArray<ATTapStep *> *steps = [strongSelf.plan.steps mutableCopy];
-        ATTapStep *updated = [[ATTapStep alloc] initWithPoint:point delayMs:oldStep.delayMs];
-        steps[index] = updated;
-        strongSelf.plan.steps = steps;
-        [strongSelf.tableView reloadData];
-    } cancel:^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-        [strongSelf showMessage:@"已取消取点（长按可取消）" title:@"取点"];
+    ATStepMarkerView *marker = self.markerViews[index];
+    marker.hidden = NO;
+    marker.userInteractionEnabled = YES;
+
+    // 自动收起面板，避免遮挡点位与目标 App。
+    if (!self.view.hidden) {
+        [self togglePanelVisibility];
+    }
+
+    // 给用户一个明显的视觉提示：请直接拖动编号点位调整坐标。
+    [UIView animateWithDuration:0.12 animations:^{
+        marker.transform = CGAffineTransformMakeScale(1.18, 1.18);
+        marker.alpha = 1.0;
+    } completion:^(__unused BOOL finished) {
+        [UIView animateWithDuration:0.12 animations:^{
+            marker.transform = CGAffineTransformIdentity;
+        }];
     }];
+
+    [self showToast:[NSString stringWithFormat:@"拖动「%ld」号点位到目标位置", (long)index + 1]];
 }
 
 - (void)removeStepAtIndex:(NSInteger)index
@@ -552,6 +566,7 @@
     [steps removeObjectAtIndex:index];
     self.plan.steps = steps;
     [self.tableView reloadData];
+    [self reloadMarkers];
 }
 
 - (void)loadPlanNamed:(NSString *)name
@@ -569,6 +584,7 @@
     self.plan = plan;
     [self.persistence setLastPlanName:plan.name];
     [self.tableView reloadData];
+    [self reloadMarkers];
 }
 
 #pragma mark - 引擎状态
@@ -576,6 +592,7 @@
 - (void)handleEngineStateChanged:(NSNotification *)note
 {
     [self.tableView reloadData];
+    [self syncHUDState];
 }
 
 #pragma mark - 弹窗辅助
@@ -604,6 +621,251 @@
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+#pragma mark - HUD：右侧快捷栏 + 拖拽点位
+
+- (UIView *)hostRootView
+{
+    UIWindow *window = self.hostWindowProvider ? self.hostWindowProvider() : nil;
+    UIView *rootView = window.rootViewController.view;
+    if (![rootView isKindOfClass:[UIView class]]) {
+        return nil;
+    }
+    return rootView;
+}
+
+- (void)installHUDIfNeeded
+{
+    if (self.hudInstalled) {
+        return;
+    }
+
+    UIView *rootView = [self hostRootView];
+    if (!rootView) {
+        return;
+    }
+    self.hudInstalled = YES;
+
+    __weak typeof(self) weakSelf = self;
+    ATQuickBarView *bar = [[ATQuickBarView alloc] initWithFrame:CGRectZero];
+    bar.onAddStep = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf addStepByQuickBar];
+    };
+    bar.onToggleRun = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf toggleStartStop];
+    };
+    bar.onTogglePanel = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        [strongSelf togglePanelVisibility];
+    };
+
+    CGFloat margin = 10;
+    CGSize barSize = bar.bounds.size;
+    bar.frame = CGRectMake(CGRectGetWidth(rootView.bounds) - barSize.width - margin,
+                           (CGRectGetHeight(rootView.bounds) - barSize.height) / 2.0,
+                           barSize.width,
+                           barSize.height);
+    bar.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleBottomMargin;
+    [rootView addSubview:bar];
+    self.quickBar = bar;
+}
+
+- (CGPoint)clampCenter:(CGPoint)center inSuperview:(UIView *)superview radius:(CGFloat)radius
+{
+    CGFloat minX = radius + 6;
+    CGFloat maxX = CGRectGetWidth(superview.bounds) - radius - 6;
+    CGFloat minY = radius + 6 + superview.safeAreaInsets.top;
+    CGFloat maxY = CGRectGetHeight(superview.bounds) - radius - 6 - superview.safeAreaInsets.bottom;
+
+    center.x = MAX(minX, MIN(maxX, center.x));
+    center.y = MAX(minY, MIN(maxY, center.y));
+    return center;
+}
+
+- (void)reloadMarkers
+{
+    [self installHUDIfNeeded];
+    UIView *rootView = [self hostRootView];
+    if (!rootView) {
+        return;
+    }
+
+    for (ATStepMarkerView *marker in self.markerViews) {
+        [marker removeFromSuperview];
+    }
+    [self.markerViews removeAllObjects];
+
+    __weak typeof(self) weakSelf = self;
+    [self.plan.steps enumerateObjectsUsingBlock:^(ATTapStep *step, NSUInteger idx, __unused BOOL *stop) {
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+
+        ATStepMarkerView *marker = [[ATStepMarkerView alloc] initWithStepIndex:(NSInteger)idx];
+        CGFloat radius = CGRectGetWidth(marker.bounds) / 2.0;
+        CGPoint clamped = [strongSelf clampCenter:step.point inSuperview:rootView radius:radius];
+        marker.center = clamped;
+        if (!CGPointEqualToPoint(clamped, step.point)) {
+            step.point = clamped;
+        }
+
+        marker.onMove = ^(ATStepMarkerView *m, CGPoint newCenter, BOOL finished) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (!innerSelf) {
+                return;
+            }
+            NSInteger stepIndex = m.stepIndex;
+            if (stepIndex < 0 || stepIndex >= innerSelf.plan.steps.count) {
+                return;
+            }
+            ATTapStep *targetStep = innerSelf.plan.steps[stepIndex];
+            targetStep.point = newCenter;
+
+            if (finished) {
+                [innerSelf.tableView reloadData];
+            }
+        };
+
+        marker.onTap = ^(ATStepMarkerView *m) {
+            __strong typeof(weakSelf) innerSelf = weakSelf;
+            if (!innerSelf) {
+                return;
+            }
+            if (innerSelf.engine.isRunning) {
+                return;
+            }
+            NSInteger stepIndex = m.stepIndex;
+            if (stepIndex < 0 || stepIndex >= innerSelf.plan.steps.count) {
+                return;
+            }
+            [innerSelf showStepActionsAtIndex:stepIndex sourceView:m];
+        };
+
+        [rootView addSubview:marker];
+        [strongSelf.markerViews addObject:marker];
+    }];
+
+    if (self.quickBar.superview == rootView) {
+        [rootView bringSubviewToFront:self.quickBar];
+    }
+    [self syncHUDState];
+}
+
+- (void)showToast:(NSString *)text
+{
+    UIView *rootView = [self hostRootView];
+    if (!rootView || text.length == 0) {
+        return;
+    }
+
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectZero];
+    label.text = text;
+    label.numberOfLines = 2;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor whiteColor];
+    label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    label.layer.cornerRadius = 10;
+    label.layer.masksToBounds = YES;
+    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightSemibold];
+
+    CGFloat margin = 14;
+    CGFloat maxWidth = MIN(CGRectGetWidth(rootView.bounds) - margin * 2, 360);
+    CGSize size = [label sizeThatFits:CGSizeMake(maxWidth - 16, CGFLOAT_MAX)];
+    label.frame = CGRectMake((CGRectGetWidth(rootView.bounds) - maxWidth) / 2.0,
+                             margin + rootView.safeAreaInsets.top,
+                             maxWidth,
+                             size.height + 16);
+    label.alpha = 0;
+    [rootView addSubview:label];
+
+    [UIView animateWithDuration:0.16 animations:^{
+        label.alpha = 1;
+    } completion:^(__unused BOOL finished) {
+        [UIView animateWithDuration:0.2 delay:1.2 options:UIViewAnimationOptionCurveEaseInOut animations:^{
+            label.alpha = 0;
+        } completion:^(__unused BOOL finished2) {
+            [label removeFromSuperview];
+        }];
+    }];
+}
+
+- (void)syncHUDState
+{
+    BOOL running = self.engine.isRunning;
+    self.quickBar.running = running;
+    self.quickBar.addEnabled = !running;
+
+    for (ATStepMarkerView *marker in self.markerViews) {
+        marker.hidden = running;
+        marker.userInteractionEnabled = !running;
+    }
+}
+
+- (void)addStepByQuickBar
+{
+    if (self.engine.isRunning) {
+        return;
+    }
+
+    UIView *rootView = [self hostRootView];
+    if (!rootView) {
+        [self showMessage:@"未找到可用 window，无法添加点位" title:@"添加失败"];
+        return;
+    }
+
+    CGPoint defaultPoint = CGPointMake(CGRectGetMidX(rootView.bounds), CGRectGetMidY(rootView.bounds));
+    // 避免默认点位被右侧栏遮住，向左偏移一点。
+    defaultPoint.x -= 70;
+
+    ATTapStep *step = [[ATTapStep alloc] initWithPoint:defaultPoint delayMs:500];
+    NSMutableArray<ATTapStep *> *steps = [self.plan.steps mutableCopy] ?: [NSMutableArray array];
+    [steps addObject:step];
+    self.plan.steps = steps;
+
+    [self.tableView reloadData];
+    [self reloadMarkers];
+    [self repickPointAtIndex:(NSInteger)self.plan.steps.count - 1];
+}
+
+- (void)togglePanelVisibility
+{
+    if (self.engine.isRunning) {
+        return;
+    }
+
+    UIView *panelView = self.view;
+    BOOL willShow = panelView.hidden;
+    if (willShow) {
+        panelView.hidden = NO;
+        panelView.alpha = 0;
+        panelView.transform = CGAffineTransformMakeScale(0.98, 0.98);
+        [UIView animateWithDuration:0.18 animations:^{
+            panelView.alpha = 1;
+            panelView.transform = CGAffineTransformIdentity;
+        }];
+    } else {
+        [UIView animateWithDuration:0.18 animations:^{
+            panelView.alpha = 0;
+            panelView.transform = CGAffineTransformMakeScale(0.98, 0.98);
+        } completion:^(__unused BOOL finished) {
+            panelView.hidden = YES;
+            panelView.alpha = 1;
+            panelView.transform = CGAffineTransformIdentity;
+        }];
+    }
 }
 
 @end

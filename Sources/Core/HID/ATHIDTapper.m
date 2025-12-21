@@ -9,6 +9,8 @@ typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
 
 extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
 extern void IOHIDEventSystemClientDispatchEvent(IOHIDEventSystemClientRef client, IOHIDEventRef event);
+extern void IOHIDEventSetIntegerValue(IOHIDEventRef event, uint32_t field, long long value);
+extern void IOHIDEventSetFloatValue(IOHIDEventRef event, uint32_t field, double value);
 
 extern IOHIDEventRef IOHIDEventCreateDigitizerEvent(CFAllocatorRef allocator,
                                                     uint64_t timeStamp,
@@ -50,6 +52,17 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 @end
 
 @implementation ATHIDTapper
+
+/// 参考同类可用实现补齐的 IOHID digitizer 字段（避免部分系统版本“事件创建成功但不被识别”）。
+static const uint32_t ATIOHIDEventFieldDigitizerType = 0x000B000D;
+static const uint32_t ATIOHIDEventFieldDigitizerIndex = 0x000B000E;
+static const uint32_t ATIOHIDEventFieldDigitizerIdentity = 0x000B000F;
+static const uint32_t ATIOHIDEventFieldDigitizerMajorRadius = 0x000B0014;
+static const uint32_t ATIOHIDEventFieldDigitizerMinorRadius = 0x000B0015;
+static const uint32_t ATIOHIDEventFieldDigitizerIntegratedDisplay = 0x000B0019;
+
+static const uint32_t ATIOHIDTransducerTypeFinger = 0x23;
+static const double ATIOHIDDefaultRadius = 0.04;
 
 - (instancetype)init
 {
@@ -113,11 +126,8 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     }
     _client = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
 
-    // senderID 取一个非 0 的随机值即可。
-    _senderID = (((uint64_t)arc4random()) << 32) | (uint64_t)arc4random();
-    if (_senderID == 0) {
-        _senderID = 1;
-    }
+    // senderID 取一个稳定的非 0 值，便于复现与排查。
+    _senderID = 0xDEFACEDBEEFFECE5ULL;
 }
 
 - (void)sendTouchWithX:(double)x y:(double)y range:(BOOL)range touch:(BOOL)touch
@@ -126,15 +136,16 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
 
     // 说明：
     // - 这里复用常见的 digitizer + finger 子事件模式，兼容性更好。
-    // - transducerType 使用 0x23，参考已分析的同类 dylib 调用习惯。
-    // - eventMask 同时携带 range + touch；由 range/touch 组合表达按下、抬起、离开范围等状态变化。
-    uint32_t eventMask = 0x3;
+    // - transducerType 使用 0x23（finger），参考同类可用实现。
+    // - eventMask 需要显式包含 position，否则部分系统版本会忽略 x/y 导致“看起来没点到/完全不生效”。
+    //   这里取 0xF（range+touch+position+identity），兼容性更好。
+    uint32_t eventMask = 0xF;
     double pressure = touch ? 1.0 : 0.0;
     IOHIDEventRef parent = IOHIDEventCreateDigitizerEvent(kCFAllocatorDefault,
                                                           timeStamp,
-                                                          0x23,
-                                                          0,
-                                                          0,
+                                                          ATIOHIDTransducerTypeFinger,
+                                                          1,
+                                                          1,
                                                           eventMask,
                                                           0,
                                                           x,
@@ -149,6 +160,12 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
     if (!parent) {
         return;
     }
+
+    // 补齐关键字段：type/index/identity/屏幕集成标记。
+    IOHIDEventSetIntegerValue(parent, ATIOHIDEventFieldDigitizerType, ATIOHIDTransducerTypeFinger);
+    IOHIDEventSetIntegerValue(parent, ATIOHIDEventFieldDigitizerIndex, 1);
+    IOHIDEventSetIntegerValue(parent, ATIOHIDEventFieldDigitizerIdentity, 1);
+    IOHIDEventSetIntegerValue(parent, ATIOHIDEventFieldDigitizerIntegratedDisplay, 1);
 
     IOHIDEventRef finger = IOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault,
                                                                 timeStamp,
@@ -165,6 +182,11 @@ extern void IOHIDEventSetSenderID(IOHIDEventRef event, uint64_t senderID);
                                                                 touch ? true : false,
                                                                 0);
     if (finger) {
+        // 半径字段在不少实现中会被显式设置；这里沿用同类 dylib 常用值（0.04）。
+        IOHIDEventSetFloatValue(finger, ATIOHIDEventFieldDigitizerMajorRadius, ATIOHIDDefaultRadius);
+        IOHIDEventSetFloatValue(finger, ATIOHIDEventFieldDigitizerMinorRadius, ATIOHIDDefaultRadius);
+        IOHIDEventSetIntegerValue(finger, ATIOHIDEventFieldDigitizerIntegratedDisplay, 1);
+
         IOHIDEventSetSenderID(finger, self.senderID);
         IOHIDEventAppendEvent(parent, finger, 0);
         CFRelease(finger);
